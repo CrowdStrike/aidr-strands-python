@@ -15,12 +15,10 @@ import json
 import logging
 import os
 from collections.abc import AsyncGenerator
-from typing import Any, TypeVar, Unpack, override
-
-from typing_extensions import TypedDict
+from typing import Any, TypedDict, TypeVar, Unpack, override
 
 from crowdstrike_aidr import AIGuard
-from crowdstrike_aidr.models.ai_guard import GuardChatCompletionsResult
+from crowdstrike_aidr.models.ai_guard import GuardChatCompletionsResponse
 from pydantic import BaseModel
 from strands.models.model import Model
 from strands.types.content import ContentBlock, Messages, SystemContentBlock
@@ -73,9 +71,6 @@ class AIGuardConfig(TypedDict, total=False):
     source_location: str
     """Geographic location of the request origin (e.g. ``"US-CA"``, ``"EU-FR"``)."""
 
-    span_id: str
-    """Identifier to correlate related AIDR events."""
-
     extra_info: dict[str, Any]
     """Additional metadata for AIDR logging in key-value pairs."""
 
@@ -112,7 +107,7 @@ def _strands_messages_to_openai(
 
     for msg in messages:
         role = msg["role"]
-        content_blocks: list[ContentBlock] = msg.get("content", [])  # type: ignore[assignment]
+        content_blocks: list[ContentBlock] = msg.get("content", [])
 
         # Collect text fragments, tool calls, and tool results separately.
         text_parts: list[str] = []
@@ -121,9 +116,9 @@ def _strands_messages_to_openai(
 
         for block in content_blocks:
             if "text" in block:
-                text_parts.append(block["text"])  # type: ignore[arg-type]
+                text_parts.append(block["text"])
             elif "toolUse" in block:
-                tu = block["toolUse"]  # type: ignore[typeddict-item]
+                tu = block["toolUse"]
                 tool_calls.append(
                     {
                         "type": "function",
@@ -135,7 +130,7 @@ def _strands_messages_to_openai(
                     }
                 )
             elif "toolResult" in block:
-                tr = block["toolResult"]  # type: ignore[typeddict-item]
+                tr = block["toolResult"]
                 content_str = ""
                 for item in tr.get("content", []):
                     if "text" in item:
@@ -152,7 +147,7 @@ def _strands_messages_to_openai(
         # then any tool result messages that follow from it.
         oai_msg: dict[str, Any] = {"role": role}
         if text_parts:
-            oai_msg["content"] = " ".join(text_parts)
+            oai_msg["content"] = "".join(text_parts)
         if tool_calls:
             oai_msg["tool_calls"] = tool_calls
         if text_parts or tool_calls:
@@ -281,6 +276,7 @@ def _rebuild_events_from_guard_output(
                 rebuilt.append(event)
             else:
                 text_block_active = True
+                text_emitted = False  # reset per block so each block gets replacement text
                 rebuilt.append(event)
 
         elif "contentBlockDelta" in event and text_block_active:
@@ -349,7 +345,7 @@ class AIGuardModel(Model):
         token: str | None = None,
         guard_input: bool = True,
         guard_output: bool = True,
-        **aidr_config: Unpack[AIGuardConfig],  # type: ignore[misc]
+        **aidr_config: Unpack[AIGuardConfig],
     ) -> None:
         resolved_base_url = base_url_template or os.environ.get(
             "CS_AIDR_BASE_URL", "https://api.crowdstrike.com/aidr/{SERVICE_NAME}"
@@ -475,13 +471,12 @@ class AIGuardModel(Model):
             "model_version": "model_version",
             "source_ip": "source_ip",
             "source_location": "source_location",
-            "span_id": "span_id",
             "extra_info": "extra_info",
         }
         kwargs: dict[str, Any] = {}
         for key, aidr_key in mapping.items():
             value = self._config.get(key)
-            if value:
+            if value is not None:
                 kwargs[aidr_key] = value
         return kwargs
 
@@ -489,7 +484,7 @@ class AIGuardModel(Model):
         self,
         event_type: str,
         guard_input_payload: dict[str, Any],
-    ) -> GuardChatCompletionsResult | None:
+    ) -> GuardChatCompletionsResponse | None:
         """Synchronous AIDR call (run in executor to avoid blocking the event loop)."""
         extra_kwargs = self._build_aidr_kwargs()
         response = self._aidr.guard_chat_completions(
@@ -497,15 +492,15 @@ class AIGuardModel(Model):
             event_type=event_type,  # type: ignore[arg-type]
             **extra_kwargs,
         )
-        return response.result if response else None
+        return response if response else None
 
     async def _call_aidr(
         self,
         event_type: str,
         guard_input_payload: dict[str, Any],
-    ) -> GuardChatCompletionsResult | None:
+    ) -> GuardChatCompletionsResponse | None:
         """Async wrapper that runs the synchronous AIDR client in a thread-pool executor."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             self._call_aidr_sync,
@@ -528,18 +523,23 @@ class AIGuardModel(Model):
             payload["tools"] = _tool_specs_to_openai(tool_specs)
 
         logger.debug("AIDR input guard | message_count=%d", len(messages))
-        result = await self._call_aidr("input", payload)
+        response = await self._call_aidr("input", payload)
 
-        if result is None:
+        if response is None:
             logger.warning("AIDR input guard returned no result; proceeding without guard")
             return messages
 
+        result = response.result
+        if result is None:
+            logger.warning("AIDR input guard result was None; proceeding without guard")
+            return messages
+
         if result.blocked:
-            logger.info("AIDR input guard BLOCKED | summary=%s", result.summary)
-            raise AIGuardBlockedError("input", result.summary or "")
+            logger.info("AIDR input guard BLOCKED | summary=%s", response.summary)
+            raise AIGuardBlockedError("input", response.summary or "")
 
         if result.transformed and result.guard_output:
-            messages = _substitute_messages(messages, result.guard_output)
+            messages = _substitute_messages(messages, result.guard_output, system_prompt, system_prompt_content)
             logger.debug("AIDR input guard transformed messages")
 
         return messages
@@ -564,15 +564,20 @@ class AIGuardModel(Model):
             payload["tools"] = _tool_specs_to_openai(tool_specs)
 
         logger.debug("AIDR output guard | conversation_length=%d", len(conversation_oai))
-        result = await self._call_aidr("output", payload)
+        response = await self._call_aidr("output", payload)
 
-        if result is None:
+        if response is None:
             logger.warning("AIDR output guard returned no result; returning original events")
             return buffered_events
 
+        result = response.result
+        if result is None:
+            logger.warning("AIDR output guard result was None; returning original events")
+            return buffered_events
+
         if result.blocked:
-            logger.info("AIDR output guard BLOCKED | summary=%s", result.summary)
-            raise AIGuardBlockedError("output", result.summary or "")
+            logger.info("AIDR output guard BLOCKED | summary=%s", response.summary)
+            raise AIGuardBlockedError("output", response.summary or "")
 
         if result.transformed and result.guard_output:
             buffered_events = _rebuild_events_from_guard_output(buffered_events, result.guard_output)
@@ -589,12 +594,15 @@ class AIGuardModel(Model):
 def _substitute_messages(
     original: Messages,
     guard_output: dict[str, Any],
+    system_prompt: str | None = None,
+    system_prompt_content: list[SystemContentBlock] | None = None,
 ) -> Messages:
     """Return a copy of *original* with text content replaced from *guard_output*.
 
-    Only ``text`` content blocks in ``user`` role messages are updated (AIDR
-    typically redacts / transforms user input).  The message structure
-    (roles, order, tool calls/results) is preserved.
+    The message structure (roles, order, tool calls/results) is preserved.
+    ``system_prompt`` / ``system_prompt_content`` must be passed when the same
+    values were used to build the AIDR payload, so the index offset introduced
+    by the prepended system entry is correctly accounted for.
     """
     updated_oai = guard_output.get("messages", [])
     # Build a lookup: index → new content string (only for messages with a
@@ -604,8 +612,12 @@ def _substitute_messages(
         if "content" in m and isinstance(m["content"], str):
             content_by_index[idx] = m["content"]
 
+    # When _strands_messages_to_openai prepended a system entry, the OAI list
+    # is offset by 1 relative to the original Strands messages list.
+    has_system = bool(system_prompt_content) or bool(system_prompt)
+
     result: Messages = []
-    oai_idx = 0  # walks through guard_output messages in parallel
+    oai_idx = 1 if has_system else 0  # skip the system entry if present
     for msg in original:
         role = msg["role"]
         new_blocks: list[ContentBlock] = []
@@ -618,6 +630,6 @@ def _substitute_messages(
                 new_blocks.append(block)
                 if "toolUse" in block or "toolResult" in block:
                     oai_idx += 1  # account for corresponding OAI message
-        result.append({"role": role, "content": new_blocks})  # type: ignore[typeddict-item]
+        result.append({"role": role, "content": new_blocks})
 
     return result

@@ -4,18 +4,17 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from strands_aidr import AIGuardBlockedError, AIGuardModel
 from strands_aidr.model import (
-    _reconstruct_assistant_message,
     _rebuild_events_from_guard_output,
+    _reconstruct_assistant_message,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -42,7 +41,12 @@ def _text_events(text: str) -> list[dict]:
         {"contentBlockDelta": {"delta": {"text": text}}},
         {"contentBlockStop": {}},
         {"messageStop": {"stopReason": "end_turn"}},
-        {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}, "metrics": {"latencyMs": 100}}},
+        {
+            "metadata": {
+                "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+                "metrics": {"latencyMs": 100},
+            }
+        },
     ]
 
 
@@ -416,8 +420,7 @@ class TestAIGuardModelConfig:
         with pytest.raises(ValueError, match="AIDR token"):
             # Ensure env var is not set.
             env = {k: v for k, v in os.environ.items() if k != "CS_AIDR_TOKEN"}
-            with patch.dict(os.environ, env, clear=True):
-                with patch("strands_aidr.model.AIGuard"):
+            with patch.dict(os.environ, env, clear=True), patch("strands_aidr.model.AIGuard"):
                     AIGuardModel(downstream)
 
     def test_get_config_returns_dict(self, model: AIGuardModel) -> None:
