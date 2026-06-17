@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Type checking
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Distribution / packaging
+MANIFEST
+*.tar.gz
+*.whl
+
+# macOS
+.DS_Store
+
+# Node (examples)
+node_modules/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
