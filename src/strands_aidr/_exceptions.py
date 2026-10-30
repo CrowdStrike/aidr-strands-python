@@ -17,3 +17,17 @@ class AIGuardBlockedError(RuntimeError):
         super().__init__(f"AIDR blocked {event_type}: {summary}")
         self.event_type = event_type
         self.summary = summary
+
+
+class AIGuardUnavailableError(RuntimeError):
+    """Raised when AIDR is unreachable or returns no result and fail_open is False.
+
+    Attributes:
+        event_type: ``"input"`` or ``"output"`` indicating which guard failed.
+    """
+
+    def __init__(self, event_type: str) -> None:
+        super().__init__(
+            f"AIDR {event_type} guard unavailable and fail_open is disabled"
+        )
+        self.event_type = event_type

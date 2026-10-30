@@ -25,7 +25,7 @@ from strands.types.content import ContentBlock, Messages, SystemContentBlock
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
-from ._exceptions import AIGuardBlockedError
+from ._exceptions import AIGuardBlockedError, AIGuardUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +345,7 @@ class AIGuardModel(Model):
         token: str | None = None,
         guard_input: bool = True,
         guard_output: bool = True,
+        fail_open: bool = False,
         **aidr_config: Unpack[AIGuardConfig],
     ) -> None:
         resolved_base_url = base_url_template or os.environ.get(
@@ -359,10 +360,11 @@ class AIGuardModel(Model):
         self.downstream = downstream
         self.guard_input = guard_input
         self.guard_output = guard_output
+        self.fail_open = fail_open
         self._config: dict[str, Any] = dict(aidr_config)
         self._aidr = AIGuard(base_url_template=resolved_base_url, token=resolved_token)
 
-        logger.debug("AIGuardModel initialised | guard_input=%s guard_output=%s", guard_input, guard_output)
+        logger.debug("AIGuardModel initialised | guard_input=%s guard_output=%s fail_open=%s", guard_input, guard_output, fail_open)
 
     # ------------------------------------------------------------------
     # Model interface
@@ -526,12 +528,16 @@ class AIGuardModel(Model):
         response = await self._call_aidr("input", payload)
 
         if response is None:
-            logger.warning("AIDR input guard returned no result; proceeding without guard")
+            logger.warning("AIDR input guard returned no result")
+            if not self.fail_open:
+                raise AIGuardUnavailableError("input")
             return messages
 
         result = response.result
         if result is None:
-            logger.warning("AIDR input guard result was None; proceeding without guard")
+            logger.warning("AIDR input guard result was None")
+            if not self.fail_open:
+                raise AIGuardUnavailableError("input")
             return messages
 
         if result.blocked:
@@ -567,12 +573,16 @@ class AIGuardModel(Model):
         response = await self._call_aidr("output", payload)
 
         if response is None:
-            logger.warning("AIDR output guard returned no result; returning original events")
+            logger.warning("AIDR output guard returned no result")
+            if not self.fail_open:
+                raise AIGuardUnavailableError("output")
             return buffered_events
 
         result = response.result
         if result is None:
-            logger.warning("AIDR output guard result was None; returning original events")
+            logger.warning("AIDR output guard result was None")
+            if not self.fail_open:
+                raise AIGuardUnavailableError("output")
             return buffered_events
 
         if result.blocked:
