@@ -346,6 +346,7 @@ class AIGuardModel(Model):
         guard_input: bool = True,
         guard_output: bool = True,
         fail_open: bool = False,
+        max_buffer_events: int | None = 10_000,
         **aidr_config: Unpack[AIGuardConfig],
     ) -> None:
         resolved_base_url = base_url_template or os.environ.get(
@@ -361,10 +362,17 @@ class AIGuardModel(Model):
         self.guard_input = guard_input
         self.guard_output = guard_output
         self.fail_open = fail_open
+        self.max_buffer_events = max_buffer_events
         self._config: dict[str, Any] = dict(aidr_config)
         self._aidr = AIGuard(base_url_template=resolved_base_url, token=resolved_token)
 
-        logger.debug("AIGuardModel initialised | guard_input=%s guard_output=%s fail_open=%s", guard_input, guard_output, fail_open)
+        logger.debug(
+            "AIGuardModel initialised | guard_input=%s guard_output=%s fail_open=%s max_buffer_events=%s",
+            guard_input,
+            guard_output,
+            fail_open,
+            max_buffer_events,
+        )
 
     # ------------------------------------------------------------------
     # Model interface
@@ -421,6 +429,12 @@ class AIGuardModel(Model):
             invocation_state=invocation_state,
             **kwargs,
         ):
+            if self.max_buffer_events is not None and len(buffered_events) >= self.max_buffer_events:
+                logger.warning(
+                    "AIDR output buffer limit reached (%d events); truncating stream before output guard (SOLAR-2259)",
+                    self.max_buffer_events,
+                )
+                break
             buffered_events.append(event)
 
         # ----------------------------------------------------------
