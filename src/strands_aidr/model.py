@@ -474,9 +474,10 @@ class AIGuardModel(Model):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_aidr_kwargs(self) -> dict[str, Any]:
+    def _build_aidr_kwargs(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         """Build keyword arguments for :meth:`AIGuard.guard_chat_completions`
         from the stored config, omitting keys with ``None`` / empty values."""
+        effective = config if config is not None else self._config
         mapping: dict[str, str] = {
             "app_id": "app_id",
             "collector_instance_id": "collector_instance_id",
@@ -491,7 +492,7 @@ class AIGuardModel(Model):
         }
         kwargs: dict[str, Any] = {}
         for key, aidr_key in mapping.items():
-            value = self._config.get(key)
+            value = effective.get(key)
             if value is not None:
                 kwargs[aidr_key] = value
         return kwargs
@@ -500,9 +501,12 @@ class AIGuardModel(Model):
         self,
         event_type: str,
         guard_input_payload: dict[str, Any],
+        config_snapshot: dict[str, Any] | None = None,
     ) -> GuardChatCompletionsResponse | None:
         """Synchronous AIDR call (run in executor to avoid blocking the event loop)."""
-        extra_kwargs = self._build_aidr_kwargs()
+        # Use the caller-supplied snapshot to avoid a cross-thread read of self._config (SOLAR-2258)
+        effective_config = config_snapshot if config_snapshot is not None else self._config
+        extra_kwargs = self._build_aidr_kwargs(effective_config)
         response = self._aidr.guard_chat_completions(
             guard_input=guard_input_payload,
             event_type=event_type,  # type: ignore[arg-type]
@@ -516,12 +520,17 @@ class AIGuardModel(Model):
         guard_input_payload: dict[str, Any],
     ) -> GuardChatCompletionsResponse | None:
         """Async wrapper that runs the synchronous AIDR client in a thread-pool executor."""
+        # Snapshot config on the event loop before crossing into the thread-pool executor.
+        # self._config is mutated by update_config() on the event loop; passing a snapshot
+        # avoids a data race between the mutation and the executor thread's read (SOLAR-2258).
+        config_snapshot = dict(self._config)
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             self._call_aidr_sync,
             event_type,
             guard_input_payload,
+            config_snapshot,
         )
 
     async def _run_input_guard(
