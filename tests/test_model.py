@@ -413,6 +413,36 @@ class TestAIGuardModelToolSpecs:
         assert call_kwargs["guard_input"]["tools"][0]["function"]["name"] == "search"
 
 
+class TestAIGuardModelBufferCap:
+    @pytest.mark.asyncio
+    async def test_stream_truncated_at_max_buffer_events(self) -> None:
+        """Buffer stops accumulating after max_buffer_events and stream still completes."""
+        # 20 events; cap at 5 — guard should only see 5 buffered events
+        downstream = _make_downstream(_text_events("x") * 4)  # 24 raw events
+        with patch("strands_aidr.model.AIGuard") as mock_aidr_cls:
+            mock_aidr = mock_aidr_cls.return_value
+            mock_aidr.guard_chat_completions.return_value = _make_aidr_response(_make_guard_result())
+            model = AIGuardModel(downstream, token="test-token", max_buffer_events=3)
+        model._aidr = mock_aidr
+
+        events = [e async for e in model.stream(SIMPLE_MESSAGES)]  # type: ignore[arg-type]
+        # Stream should still complete (output guard called)
+        assert mock_aidr.guard_chat_completions.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_cap_when_max_buffer_events_is_none(self) -> None:
+        """Setting max_buffer_events=None disables the cap."""
+        downstream = _make_downstream(_text_events("x") * 3)
+        with patch("strands_aidr.model.AIGuard") as mock_aidr_cls:
+            mock_aidr = mock_aidr_cls.return_value
+            mock_aidr.guard_chat_completions.return_value = _make_aidr_response(_make_guard_result())
+            model = AIGuardModel(downstream, token="test-token", max_buffer_events=None)
+        model._aidr = mock_aidr
+
+        events = [e async for e in model.stream(SIMPLE_MESSAGES)]  # type: ignore[arg-type]
+        assert mock_aidr.guard_chat_completions.call_count == 2
+
+
 class TestAIGuardModelConfig:
     def test_missing_token_raises(self, downstream: MagicMock) -> None:
         import os
